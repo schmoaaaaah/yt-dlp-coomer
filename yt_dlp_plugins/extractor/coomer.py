@@ -1,5 +1,6 @@
 # ⚠ Don't use relative imports
 from yt_dlp.extractor.common import InfoExtractor
+from yt_dlp.utils import MEDIA_EXTENSIONS
 
 
 class CoomerBaseIE(InfoExtractor):
@@ -7,6 +8,11 @@ class CoomerBaseIE(InfoExtractor):
 
     _API_BASE = "https://coomer.st/api/v1"
     _VALID_URL = False
+
+    def _is_supported_media(self, extension):
+        """Check if extension is a supported video/audio format."""
+        ext = extension.lstrip(".").lower()
+        return ext in (*MEDIA_EXTENSIONS.video, *MEDIA_EXTENSIONS.audio)
 
     def _fetch_user_info(self, platform, user):
         return self._download_json(
@@ -95,17 +101,24 @@ class CoomerPostIE(CoomerBaseIE):
         )
         userinfo = self._fetch_user_info(platform, user)
 
-        attachments = data.get("attachments", [])
+        raw_attachments = data.get("attachments", [])
+        # Filter to only supported media formats
+        attachments = [
+            (i, att) for i, att in enumerate(raw_attachments)
+            if self._is_supported_media(att.get("extension", ""))
+        ]
+
         if not attachments:
-            self.raise_no_formats("No attachments found for this post")
+            self.raise_no_formats("No supported media attachments found for this post")
 
         if len(attachments) == 1:
-            return self._build_entry(data, userinfo, 0)
+            orig_idx, _ = attachments[0]
+            return self._build_entry(data, userinfo, orig_idx)
 
         # Multiple attachments - return as playlist
-        self.to_screen(f"Post has {len(attachments)} attachments")
+        self.to_screen(f"Post has {len(attachments)} supported attachments")
         entries = [
-            self._build_entry(data, userinfo, i) for i in range(len(attachments))
+            self._build_entry(data, userinfo, orig_idx) for orig_idx, _ in attachments
         ]
 
         return {
@@ -139,15 +152,29 @@ class CoomerUserIE(CoomerBaseIE):
     ]
 
     def _entries(self, platform, user):
-        data = self._download_json(
-            f"{self._API_BASE}/{platform}/user/{user}/posts",
-            user,
-            headers={"Accept": "text/css"},
-        )
+        offset = 0
+        page_size = 50
 
-        for post in data:
-            post_url = self._build_post_url(platform, user, post["id"])
-            yield self.url_result(post_url, CoomerPostIE, post["id"], post.get("title"))
+        while True:
+            data = self._download_json(
+                f"{self._API_BASE}/{platform}/user/{user}/posts",
+                user,
+                query={"o": offset} if offset else None,
+                headers={"Accept": "text/css"},
+                note=f"Downloading posts page {offset // page_size + 1}",
+            )
+
+            if not data:
+                break
+
+            for post in data:
+                post_url = self._build_post_url(platform, user, post["id"])
+                yield self.url_result(post_url, CoomerPostIE, post["id"], post.get("title"))
+
+            if len(data) < page_size:
+                break
+
+            offset += page_size
 
     def _real_extract(self, url):
         mobj = self._match_valid_url(url)
