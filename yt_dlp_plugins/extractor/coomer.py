@@ -65,6 +65,15 @@ class CoomerPostIE(CoomerBaseIE):
 
     def _build_entry(self, post, userinfo, attachment_index=0):
         attachment = post["attachments"][attachment_index]
+        thumbnails = []
+        if post["previews"] and len(post["previews"]) > 0:
+            for preview in post["previews"]:
+                thumbnails.append(
+                    {
+                        "id": f"preview-{preview['name']}",
+                        "url": f"{preview['server']}/data{preview['path']}",
+                    }
+                )
         return {
             "id": f"{userinfo['service']}-{userinfo['name']}-{post['post']['id']}-{attachment_index}",
             "title": post["post"]["title"] or f"Post {post['post']['id']}",
@@ -72,6 +81,7 @@ class CoomerPostIE(CoomerBaseIE):
             "description": post["post"]["content"],
             "url": f"{attachment['server']}/data{attachment['path']}",
             "ext": attachment["extension"].lstrip("."),
+            "thumbnails": thumbnails,
             "uploader": userinfo["name"],
             "uploader_id": userinfo["id"],
             "uploader_url": self._build_user_url(userinfo["service"], userinfo["id"]),
@@ -104,7 +114,8 @@ class CoomerPostIE(CoomerBaseIE):
         raw_attachments = data.get("attachments", [])
         # Filter to only supported media formats
         attachments = [
-            (i, att) for i, att in enumerate(raw_attachments)
+            (i, att)
+            for i, att in enumerate(raw_attachments)
             if self._is_supported_media(att.get("extension", ""))
         ]
 
@@ -169,7 +180,9 @@ class CoomerUserIE(CoomerBaseIE):
 
             for post in data:
                 post_url = self._build_post_url(platform, user, post["id"])
-                yield self.url_result(post_url, CoomerPostIE, post["id"], post.get("title"))
+                yield self.url_result(
+                    post_url, CoomerPostIE, post["id"], post.get("title")
+                )
 
             if len(data) < page_size:
                 break
