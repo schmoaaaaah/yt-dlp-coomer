@@ -1,6 +1,7 @@
 # ⚠ Don't use relative imports
 from yt_dlp.extractor.common import InfoExtractor
-from yt_dlp.utils import MEDIA_EXTENSIONS
+from yt_dlp.networking.exceptions import HTTPError
+from yt_dlp.utils import ExtractorError, MEDIA_EXTENSIONS
 
 
 class CoomerBaseIE(InfoExtractor):
@@ -14,8 +15,25 @@ class CoomerBaseIE(InfoExtractor):
         ext = extension.lstrip(".").lower()
         return ext in (*MEDIA_EXTENSIONS.video, *MEDIA_EXTENSIONS.audio)
 
+    def _download_json_with_retry(self, url, video_id, **kwargs):
+        """Download JSON with retry logic for rate limiting."""
+        last_error = None
+        for retry in self.RetryManager():
+            try:
+                return self._download_json(url, video_id, **kwargs)
+            except ExtractorError as e:
+                if not isinstance(e.cause, HTTPError) or e.cause.status not in (403, 429, 502, 503):
+                    raise
+                if e.cause.status in (403, 429):
+                    self.report_warning(
+                        'Rate limit hit. Use --extractor-retries and --retry-sleep '
+                        'to configure retry behavior.', only_once=True)
+                last_error = e
+                retry.error = e.cause
+        raise last_error  # type: ignore[misc]
+
     def _fetch_user_info(self, platform, user):
-        return self._download_json(
+        return self._download_json_with_retry(
             f"{self._API_BASE}/{platform}/user/{user}/profile",
             user,
             headers={"Accept": "text/css"},
@@ -104,7 +122,7 @@ class CoomerPostIE(CoomerBaseIE):
         user = mobj.group("user")
         post_id = mobj.group("id")
 
-        data = self._download_json(
+        data = self._download_json_with_retry(
             f"{self._API_BASE}/{platform}/user/{user}/post/{post_id}",
             post_id,
             headers={"Accept": "text/css"},
@@ -167,7 +185,7 @@ class CoomerUserIE(CoomerBaseIE):
         page_size = 50
 
         while True:
-            data = self._download_json(
+            data = self._download_json_with_retry(
                 f"{self._API_BASE}/{platform}/user/{user}/posts",
                 user,
                 query={"o": offset} if offset else None,
