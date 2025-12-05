@@ -2,6 +2,14 @@
 from yt_dlp.extractor.common import InfoExtractor
 from yt_dlp.networking.exceptions import HTTPError
 from yt_dlp.utils import ExtractorError, MEDIA_EXTENSIONS
+from random import shuffle
+
+coomer_media_hosts = [
+    "https://n1.coomer.st",
+    "https://n2.coomer.st",
+    "https://n3.coomer.st",
+    "https://n4.coomer.st",
+]
 
 
 class CoomerBaseIE(InfoExtractor):
@@ -22,12 +30,19 @@ class CoomerBaseIE(InfoExtractor):
             try:
                 return self._download_json(url, video_id, **kwargs)
             except ExtractorError as e:
-                if not isinstance(e.cause, HTTPError) or e.cause.status not in (403, 429, 502, 503):
+                if not isinstance(e.cause, HTTPError) or e.cause.status not in (
+                    403,
+                    429,
+                    502,
+                    503,
+                ):
                     raise
                 if e.cause.status in (403, 429):
                     self.report_warning(
-                        'Rate limit hit. Use --extractor-retries and --retry-sleep '
-                        'to configure retry behavior.', only_once=True)
+                        "Rate limit hit. Use --extractor-retries and --retry-sleep "
+                        "to configure retry behavior.",
+                        only_once=True,
+                    )
                 last_error = e
                 retry.error = e.cause
         raise last_error  # type: ignore[misc]
@@ -82,23 +97,62 @@ class CoomerPostIE(CoomerBaseIE):
     ]
 
     def _build_entry(self, post, userinfo, attachment_index=0):
-        attachment = post["attachments"][attachment_index]
+        attachment = post["post"]["attachments"][attachment_index]
+        ext = attachment["path"].split(".")[-1].lower()
+        formats = []
         thumbnails = []
-        if post["previews"] and len(post["previews"]) > 0:
+        shuffle(coomer_media_hosts)
+        if ext in MEDIA_EXTENSIONS.video:
+            # Find unique thumbnails in previews whose path is not in post.attachments
+            attachment_paths = {att["path"] for att in post["post"]["attachments"]}
             for preview in post["previews"]:
-                thumbnails.append(
+                if preview["path"] not in attachment_paths:
+                    thumbnails.append(
+                        {
+                            "url": f"https://img.coomer.st/thumbnail/data{preview['path']}",
+                        }
+                    )
+            if len(thumbnails) > 1:
+                # I have yet to figure out how they are associated so it only works if they are unique for now
+                thumbnails = []
+            for att in post["attachments"]:
+                if attachment["path"] == att["path"]:
+                    for host in coomer_media_hosts:
+                        formats.append(
+                            {
+                                "url": f"{host}/data{att['path']}",
+                            }
+                        )
+                    break
+        elif ext in MEDIA_EXTENSIONS.audio:
+            for server in coomer_media_hosts:
+                formats.append(
                     {
-                        "id": f"preview-{preview['name']}",
-                        "url": f"{preview['server']}/data{preview['path']}",
+                        "url": f"{server}/data{attachment['path']}",
                     }
                 )
+        else:
+            for preview in post["previews"]:
+                if preview["path"] == attachment["path"]:
+                    thumbnails.append(
+                        {
+                            "url": f"https://img.coomer.st/thumbnail/data{preview['path']}",
+                        }
+                    )
+                    break
+            for server in coomer_media_hosts:
+                formats.append(
+                    {
+                        "url": f"{server}/data{attachment['path']}?f={attachment['name']}",
+                    }
+                )
+
         return {
             "id": f"{userinfo['service']}-{userinfo['name']}-{post['post']['id']}-{attachment_index}",
             "title": post["post"]["title"] or f"Post {post['post']['id']}",
             "display_id": f"{attachment['name']}",
             "description": post["post"]["content"],
-            "url": f"{attachment['server']}/data{attachment['path']}",
-            "ext": attachment["extension"].lstrip("."),
+            "formats": formats,
             "thumbnails": thumbnails,
             "uploader": userinfo["name"],
             "uploader_id": userinfo["id"],
@@ -129,38 +183,39 @@ class CoomerPostIE(CoomerBaseIE):
         )
         userinfo = self._fetch_user_info(platform, user)
 
-        raw_attachments = data.get("attachments", [])
-        # Filter to only supported media formats
-        attachments = [
-            (i, att)
-            for i, att in enumerate(raw_attachments)
-            if self._is_supported_media(att.get("extension", ""))
-        ]
+        if len(data["post"]["attachments"]) == 0 and len(data["attachments"]) > 0:
+            # Filter out unsupported media attachments
+            for att in data["attachments"]:
+                data["post"]["attachments"].append(
+                    {
+                        "name": att["name"],
+                        "path": att["path"],
+                    }
+                )
 
-        if not attachments:
+        if len(data["post"]["attachments"]) == 0:
             self.raise_no_formats("No supported media attachments found for this post")
+        elif len(data["post"]["attachments"]) == 1:
+            return self._build_entry(data, userinfo, 0)
+        else:
+            # Multiple attachments - return as playlist
+            self.to_screen(
+                f"Post has {len(data['post']['attachments'])} supported attachments"
+            )
+            entries = []
+            for idx in range(len(data["post"]["attachments"])):
+                entries.append(self._build_entry(data, userinfo, idx))
 
-        if len(attachments) == 1:
-            orig_idx, _ = attachments[0]
-            return self._build_entry(data, userinfo, orig_idx)
-
-        # Multiple attachments - return as playlist
-        self.to_screen(f"Post has {len(attachments)} supported attachments")
-        entries = [
-            self._build_entry(data, userinfo, orig_idx) for orig_idx, _ in attachments
-        ]
-
-        return {
-            "_type": "playlist",
-            "id": f"{userinfo['service']}-{userinfo['name']}-{post_id}",
-            "title": data["post"]["title"] or f"Post {post_id}",
-            "description": data["post"]["content"],
-            "uploader": userinfo["name"],
-            "uploader_id": userinfo["id"],
-            "channel": userinfo["name"],
-            "age_limit": 18,
-            "entries": entries,
-        }
+            return self.playlist_result(
+                entries=entries,
+                description=data["post"]["content"],
+                playlist_id=f"{userinfo['service']}-{userinfo['name']}-{post_id}",
+                playlist_title=data["post"]["title"] or f"Post {post_id}",
+                uploader=userinfo["name"],
+                uploader_id=userinfo["id"],
+                channel=userinfo["name"],
+                channel_id=userinfo["id"],
+            )
 
 
 class CoomerUserIE(CoomerBaseIE):
